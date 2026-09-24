@@ -25,7 +25,7 @@
   import { locale } from '$lib/stores/preferences.store';
   import { getAssetMediaUrl, handlePromiseError, memoryLaneTitle } from '$lib/utils';
   import { fromISODateTimeUTC, toTimelineAsset } from '$lib/utils/timeline-util';
-  import { AssetMediaSize, AssetTypeEnum, getAssetInfo } from '@immich/sdk';
+  import { AssetMediaSize, AssetTypeEnum, getAssetInfo, MemoryType } from '@immich/sdk';
   import { ActionButton, IconButton, Text } from '@immich/ui';
   import {
     mdiCardsOutline,
@@ -68,6 +68,15 @@
     currentAssetId ? await getAssetInfo({ ...authManager.params, id: currentAssetId }) : undefined,
   );
   let currentTimelineAssets = $derived(current?.memory.assets ?? []);
+
+  const birthdayAge = $derived.by(() => {
+    if (current?.memory.type !== MemoryType.Birthday) {
+      return;
+    }
+
+    const age = current.asset.localDateTime.year - current.memory.data.year;
+    return age >= 0 ? age : undefined;
+  });
 
   let viewerHeight = $state(0);
 
@@ -533,9 +542,12 @@
 
             <div class="absolute inset-s-8 top-4 text-sm font-medium text-white">
               <p>
-                {fromISODateTimeUTC(current.memory.assets[0].localDateTime).toLocaleString(DateTime.DATE_FULL, {
-                  locale: $locale,
-                })}
+                {fromISODateTimeUTC(current.memory.assets[assetIndex].localDateTime).toLocaleString(
+                  DateTime.DATE_FULL,
+                  {
+                    locale: $locale,
+                  },
+                )}
               </p>
               <p>
                 {#await currentMemoryAssetFull then asset}
@@ -543,6 +555,9 @@
                   {asset?.exifInfo?.country || ''}
                 {/await}
               </p>
+              {#if birthdayAge !== undefined}
+                <p>{$t('birthday_memory_age', { values: { age: birthdayAge } })}</p>
+              {/if}
             </div>
           </div>
         </div>

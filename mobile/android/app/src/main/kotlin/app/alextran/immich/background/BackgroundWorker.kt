@@ -66,10 +66,11 @@ class BackgroundWorker(context: Context, params: WorkerParameters) :
      * When it elapses the upload in progress is cancelled, and nothing is resumed: the next run
      * sends that file again from its first byte. So this has to cover the largest single file at
      * the slowest link it is realistically sent over, or that file can never be backed up from
-     * the background at all. At 20 minutes, a 4.9 GB video on a 20 Mbit/s uplink was cut off 19
-     * minutes into every hourly run, about two thirds of the way through, and never arrived.
+     * the background at all. At 20 minutes, a 4.9 GB video that was getting 2.8 MB/s through a
+     * CDN was cut off 19 minutes into every hourly run, about two thirds of the way through, and
+     * never arrived. (The uplink was not the limit: sent directly, the same file went at 10 MB/s.)
      *
-     * Three hours is about 30 GB at that rate. It is also half of the six hours a day that
+     * Three hours is about 30 GB at the slower rate. It is also half of the six hours a day that
      * Android 15 and later allow a dataSync foreground service, so that a single run cannot use
      * up the allowance by itself. A run that does reach the allowance is stopped by WorkManager
      * through onStopped(), which needs work-runtime 2.10 or newer: before that the timeout went

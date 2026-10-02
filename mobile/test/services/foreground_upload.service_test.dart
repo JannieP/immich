@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:drift/drift.dart' hide isNotNull, isNull;
@@ -5,11 +6,14 @@ import 'package:drift/native.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:immich_mobile/data/db/main/database.dart';
+import 'package:immich_mobile/domain/models/asset/base_asset.model.dart';
+import 'package:immich_mobile/domain/models/settings_key.dart';
 import 'package:immich_mobile/domain/models/store.model.dart';
 import 'package:immich_mobile/domain/services/store.service.dart';
 import 'package:immich_mobile/entities/store.entity.dart';
 import 'package:immich_mobile/infrastructure/repositories/settings.repository.dart';
 import 'package:immich_mobile/infrastructure/repositories/store.repository.dart';
+import 'package:immich_mobile/platform/connectivity_api.g.dart';
 import 'package:immich_mobile/repositories/upload.repository.dart';
 import 'package:immich_mobile/services/foreground_upload.service.dart';
 import 'package:mocktail/mocktail.dart';
@@ -98,6 +102,113 @@ void main() {
     });
     return captured;
   }
+
+  group('countUploadableCandidates', () {
+    const userId = 'user-id';
+    final photo = LocalAssetStub.image1;
+    final video = LocalAsset(
+      id: "video1",
+      name: "video1.mp4",
+      type: AssetType.video,
+      createdAt: DateTime(2025),
+      updatedAt: DateTime(2025, 2),
+      playbackStyle: AssetPlaybackStyle.video,
+      isEdited: false,
+    );
+
+    setUpAll(() {
+      registerFallbackValue(photo);
+    });
+
+    void candidatesAre(List<LocalAsset> assets) {
+      when(() => mockBackupRepository.getCandidates(userId)).thenAnswer((_) async => assets);
+    }
+
+    void onWifi() {
+      when(
+        () => mockConnectivityApi.getCapabilities(),
+      ).thenAnswer((_) async => [NetworkCapability.wifi, NetworkCapability.unmetered]);
+    }
+
+    void onMobileData() {
+      when(() => mockConnectivityApi.getCapabilities()).thenAnswer((_) async => [NetworkCapability.cellular]);
+    }
+
+    tearDown(() async {
+      await SettingsRepository.instance.clear([
+        SettingsKey.backupUseCellularForPhotos,
+        SettingsKey.backupUseCellularForVideos,
+      ]);
+    });
+
+    test('is zero when everything is already backed up, without asking about the network', () async {
+      candidatesAre([]);
+
+      expect(await sut.countUploadableCandidates(userId), 0);
+
+      verifyNever(() => mockConnectivityApi.getCapabilities());
+    });
+
+    test('counts every candidate on Wi-Fi', () async {
+      candidatesAre([photo, video]);
+      onWifi();
+
+      expect(await sut.countUploadableCandidates(userId), 2);
+    });
+
+    test('is zero on mobile data when nothing may use it', () async {
+      candidatesAre([photo, video]);
+      onMobileData();
+
+      expect(await sut.countUploadableCandidates(userId), 0);
+    });
+
+    test('counts photos on mobile data when photos may use it', () async {
+      await SettingsRepository.instance.write(SettingsKey.backupUseCellularForPhotos, true);
+      candidatesAre([photo, video]);
+      onMobileData();
+
+      expect(await sut.countUploadableCandidates(userId), 1);
+    });
+
+    test('counts videos on mobile data when videos may use it', () async {
+      await SettingsRepository.instance.write(SettingsKey.backupUseCellularForVideos, true);
+      candidatesAre([photo, video, video]);
+      onMobileData();
+
+      expect(await sut.countUploadableCandidates(userId), 2);
+    });
+
+    test('agrees with what the upload would attempt', () async {
+      // The count exists to predict uploadCandidates. If the two ever disagree,
+      // either the server is woken for nothing or a picture is left behind.
+      await SettingsRepository.instance.write(SettingsKey.backupUseCellularForPhotos, true);
+      candidatesAre([photo, video]);
+      onMobileData();
+      when(() => mockStorageRepository.clearCache()).thenAnswer((_) async {});
+      when(() => mockStorageRepository.getAssetEntityForAsset(any())).thenAnswer((_) async => null);
+      final attempted = <String>[];
+
+      await sut.uploadCandidates(
+        userId,
+        Completer<void>(),
+        useSequentialUpload: true,
+        callbacks: UploadCallbacks(onError: (id, _) => attempted.add(id)),
+      );
+
+      expect(attempted, [photo.localId]);
+      expect(await sut.countUploadableCandidates(userId), attempted.length);
+    });
+
+    test('does not contact the server', () async {
+      candidatesAre([photo]);
+      onWifi();
+
+      await sut.countUploadableCandidates(userId);
+
+      verifyZeroInteractions(mockUploadRepository);
+    });
+  });
 
   group('uploadSingleAsset', () {
     test('should upload the motion part hidden and keep the still image visible', () async {

@@ -77,6 +77,25 @@ class ForegroundUploadService {
     return _backupRepository.getCandidates(userId, onlyHashed: onlyHashed);
   }
 
+  /// How many backup candidates [uploadCandidates] would try to send right now.
+  ///
+  /// Answered from the phone's own database and its current network, without
+  /// contacting the server. A background run asks this before anything of its
+  /// own touches the network, so that a run with nothing to send stays off it.
+  ///
+  /// Counts only what would really be attempted. A candidate that needs Wi-Fi
+  /// while the phone is on mobile data is skipped by the upload as well, and
+  /// contacting the server on its account would achieve nothing.
+  Future<int> countUploadableCandidates(String userId) async {
+    final candidates = await _backupRepository.getCandidates(userId);
+    if (candidates.isEmpty) {
+      return 0;
+    }
+
+    final hasWifi = (await _connectivityApi.getCapabilities()).isUnmetered;
+    return candidates.where((asset) => hasWifi || !_shouldRequireWiFi(asset)).length;
+  }
+
   /// Bulk upload of backup candidates from selected albums
   Future<void> uploadCandidates(
     String userId,

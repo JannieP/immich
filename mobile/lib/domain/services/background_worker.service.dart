@@ -9,6 +9,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/constants/constants.dart';
 import 'package:immich_mobile/data/db/logger/database.dart';
 import 'package:immich_mobile/data/db/main/database.dart';
+import 'package:immich_mobile/domain/services/background_backup_steps.dart';
 import 'package:immich_mobile/domain/services/hash.service.dart';
 import 'package:immich_mobile/domain/services/local_sync.service.dart';
 import 'package:immich_mobile/domain/services/log.service.dart';
@@ -209,25 +210,40 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
     );
     final sw = Stopwatch()..start();
     try {
-      if (!await _syncAssets(hashTimeout: hashTimeout)) {
-        _logger.warning("Remote sync did not complete successfully, skipping backup");
-        return;
-      }
-
-      final backupFuture = _handleBackup();
-      Timer? cancelTimer;
-      if (backupTimeout != null) {
-        cancelTimer = Timer(backupTimeout, () {
-          if (!_cancellationToken.isCompleted) {
-            _logger.warning("$debugLabel timed out after ${backupTimeout.inMinutes}m, cancelling backup");
-            _cancellationToken.complete();
+      final outcome = await runBackgroundBackup(
+        syncLocal: () => _localSyncService.sync(),
+        hash: () => _hashAssets(timeout: hashTimeout),
+        hasSomethingToUpload: _hasSomethingToUpload,
+        syncRemote: _remoteSyncWithRetry,
+        // The token as well as the flag: a backup that ran out of time has
+        // completed the token, and there is nothing left to do after it.
+        isCancelled: () => _isCleanedUp || _cancellationToken.isCompleted,
+        onFollowUpSyncFailed: (error, stack) {
+          _logger.warning("Could not sync after the backup, the next run will", error, stack);
+        },
+        backup: () async {
+          final backupFuture = _handleBackup();
+          Timer? cancelTimer;
+          if (backupTimeout != null) {
+            cancelTimer = Timer(backupTimeout, () {
+              if (!_cancellationToken.isCompleted) {
+                _logger.warning("$debugLabel timed out after ${backupTimeout.inMinutes}m, cancelling backup");
+                _cancellationToken.complete();
+              }
+            });
           }
-        });
-      }
-      try {
-        await backupFuture;
-      } finally {
-        cancelTimer?.cancel();
+          try {
+            await backupFuture;
+          } finally {
+            cancelTimer?.cancel();
+          }
+        },
+      );
+
+      if (outcome == BackgroundBackupOutcome.nothingToUpload) {
+        _logger.info("Nothing to upload, so the server was not contacted");
+      } else if (outcome == BackgroundBackupOutcome.remoteSyncFailed) {
+        _logger.warning("Remote sync did not complete successfully, skipping backup");
       }
     } catch (error, stack) {
       _logger.severe("Failed to complete $debugLabel", error, stack);
@@ -380,21 +396,11 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
     return false;
   }
 
-  Future<bool> _syncAssets({Duration? hashTimeout}) async {
-    await _localSyncService.sync();
-    if (_isCleanedUp) {
-      return false;
-    }
-
-    final isSuccess = await _remoteSyncWithRetry();
-    if (_isCleanedUp) {
-      return isSuccess;
-    }
-
+  Future<void> _hashAssets({Duration? timeout}) async {
     var hashFuture = _hashService.hashAssets();
-    if (hashTimeout != null) {
+    if (timeout != null) {
       hashFuture = hashFuture.timeout(
-        hashTimeout,
+        timeout,
         onTimeout: () {
           // Consume cancellation errors as we want to continue processing
         },
@@ -402,7 +408,27 @@ class BackgroundWorkerBgService extends BackgroundWorkerFlutterApi {
     }
 
     await hashFuture;
-    return isSuccess;
+  }
+
+  /// Whether this run has anything to send, answered without the network.
+  ///
+  /// See [runBackgroundBackup] for why this is asked before the server is.
+  Future<bool> _hasSomethingToUpload() {
+    final uploadService = _ref?.read(foregroundUploadServiceProvider);
+    return somethingToUpload(
+      backupEnabled: _isBackupEnabled,
+      userId: uploadService == null ? null : _ref?.read(currentUserProvider)?.id,
+      countUploadable: (userId) async {
+        final count = await uploadService!.countUploadableCandidates(userId);
+        if (count > 0) {
+          _logger.info("$count asset(s) waiting to be uploaded");
+        }
+        return count;
+      },
+      onCountFailed: (error, stack) {
+        _logger.warning("Could not tell whether anything needs uploading, syncing anyway", error, stack);
+      },
+    );
   }
 }
 
